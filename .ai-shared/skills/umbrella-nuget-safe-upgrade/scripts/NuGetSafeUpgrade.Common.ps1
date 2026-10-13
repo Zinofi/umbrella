@@ -231,7 +231,8 @@ function Get-NuGetUpgradeApplicableFrameworks {
     param(
         [string]$Condition,
         [string[]]$ProjectTargetFrameworks,
-        [string]$ProjectName = ''
+        [string]$ProjectName = '',
+        [hashtable]$ProjectProperties = @{}
     )
 
     if ($null -eq $ProjectTargetFrameworks -or $ProjectTargetFrameworks.Count -eq 0) {
@@ -241,7 +242,7 @@ function Get-NuGetUpgradeApplicableFrameworks {
     $applicable = New-Object System.Collections.Generic.List[string]
 
     foreach ($framework in $ProjectTargetFrameworks) {
-        if (Test-NuGetUpgradeConditionApplies -Condition $Condition -TargetFramework $framework -ProjectName $ProjectName) {
+        if (Test-NuGetUpgradeConditionApplies -Condition $Condition -TargetFramework $framework -ProjectName $ProjectName -ProjectProperties $ProjectProperties) {
             $applicable.Add($framework)
         }
     }
@@ -253,7 +254,8 @@ function Test-NuGetUpgradeConditionApplies {
     param(
         [string]$Condition,
         [string]$TargetFramework,
-        [string]$ProjectName
+        [string]$ProjectName,
+        [hashtable]$ProjectProperties = @{}
     )
 
     if ([string]::IsNullOrWhiteSpace($Condition)) {
@@ -264,28 +266,29 @@ function Test-NuGetUpgradeConditionApplies {
         TargetFramework = $TargetFramework
         MSBuildProjectName = $ProjectName
     }
-    $hasUnknownProperty = $false
+    foreach ($propertyName in $ProjectProperties.Keys) {
+        if (-not $properties.ContainsKey($propertyName)) {
+            $properties[$propertyName] = $ProjectProperties[$propertyName]
+        }
+    }
+    $propertyPattern = '\$\((?<name>[^)]+)\)'
+    # Check before entering the regex delegate: assignments inside that script block
+    # do not update a scalar in the caller's scope. Unknown properties may come from imports.
+    foreach ($propertyMatch in [regex]::Matches($Condition, $propertyPattern)) {
+        if (-not $properties.ContainsKey($propertyMatch.Groups['name'].Value)) {
+            return $true
+        }
+    }
     $expanded = [regex]::Replace(
         $Condition,
-        '\$\((?<name>[^)]+)\)',
+        $propertyPattern,
         [System.Text.RegularExpressions.MatchEvaluator]{
             param($match)
 
             $name = $match.Groups['name'].Value
-            if (-not $properties.ContainsKey($name)) {
-                $hasUnknownProperty = $true
-                return $match.Value
-            }
-
             return [string]$properties[$name]
         }
     )
-
-    # Unknown MSBuild properties can affect applicability. Stay conservative and validate
-    # every framework rather than accidentally omitting a real consumer.
-    if ($hasUnknownProperty) {
-        return $true
-    }
 
     $evaluated = [regex]::Replace(
         $expanded,
@@ -326,11 +329,27 @@ function Get-NuGetUpgradeProjectReferences {
         Where-Object { $_.FullName -notmatch '\\(bin|obj)\\' }
 
     $results = New-Object System.Collections.Generic.List[object]
+    $centralPropsCache = @{}
+    $resolvedRoot = (Resolve-Path -LiteralPath $RepoRoot).Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 
     foreach ($project in $projects) {
         [xml]$xml = Get-Content -Path $project.FullName -Raw -ErrorAction Stop
         $projectTargetFrameworks = Get-NuGetUpgradeProjectTargetFrameworks -ProjectXml $xml
         $packageNodes = $xml.SelectNodes("//*[local-name()='PackageReference']")
+        $projectProperties = @{}
+        $testProjectNodes = @($xml.SelectNodes("//*[local-name()='IsTestProject']"))
+        # An absent value may be established by Directory.Build.props or another
+        # import. Keep it unknown so conditional references are validated conservatively.
+        if ($testProjectNodes.Count -eq 1) {
+            $testProjectNode = $testProjectNodes[0]
+            $testProjectCondition = Join-NuGetUpgradeConditions -Conditions @(
+                (Get-NuGetUpgradeXmlAttributeValue -Node $testProjectNode.ParentNode -Name 'Condition')
+                (Get-NuGetUpgradeXmlAttributeValue -Node $testProjectNode -Name 'Condition')
+            )
+            if ([string]::IsNullOrWhiteSpace($testProjectCondition) -and $testProjectNode.InnerText -match '^(?i:true|false)$') {
+                $projectProperties.IsTestProject = $testProjectNode.InnerText
+            }
+        }
 
         for ($itemIndex = 0; $itemIndex -lt $packageNodes.Count; $itemIndex++) {
             $node = $packageNodes[$itemIndex]
@@ -356,9 +375,56 @@ function Get-NuGetUpgradeProjectReferences {
                 CurrentVersion = $version
                 Condition = $combinedCondition
                 ItemIndex = $itemIndex
-                ApplicableTargetFrameworks = @(Get-NuGetUpgradeApplicableFrameworks -Condition $combinedCondition -ProjectTargetFrameworks $projectTargetFrameworks -ProjectName ([System.IO.Path]::GetFileNameWithoutExtension($project.Name)))
+                ApplicableTargetFrameworks = @(Get-NuGetUpgradeApplicableFrameworks -Condition $combinedCondition -ProjectTargetFrameworks $projectTargetFrameworks -ProjectName ([System.IO.Path]::GetFileNameWithoutExtension($project.Name)) -ProjectProperties $projectProperties)
                 ProjectTargetFrameworks = @($projectTargetFrameworks)
             })
+        }
+
+        # PackageReference items in the nearest Directory.Packages.props are imported
+        # into every consuming project too (including shared test-tooling references).
+        $centralDirectory = $project.Directory
+        while ($null -ne $centralDirectory) {
+            $centralPropsPath = Join-Path -Path $centralDirectory.FullName -ChildPath 'Directory.Packages.props'
+            if (Test-Path -LiteralPath $centralPropsPath) {
+                if (-not $centralPropsCache.ContainsKey($centralPropsPath)) {
+                    $centralPropsCache[$centralPropsPath] = [xml](Get-Content -LiteralPath $centralPropsPath -Raw -ErrorAction Stop)
+                }
+                $centralPackageNodes = $centralPropsCache[$centralPropsPath].SelectNodes("//*[local-name()='PackageReference']")
+                foreach ($centralNode in $centralPackageNodes) {
+                    $packageId = Get-NuGetUpgradeXmlAttributeValue -Node $centralNode -Name 'Include'
+                    $version = Get-NuGetUpgradeXmlAttributeValue -Node $centralNode -Name 'Version'
+                    # Update items do not introduce a reference. Explicit versions are not
+                    # centrally managed; this pass discovers consumers of PackageVersion.
+                    if ([string]::IsNullOrWhiteSpace($packageId) -or -not [string]::IsNullOrWhiteSpace($version)) {
+                        continue
+                    }
+                    $combinedCondition = Join-NuGetUpgradeConditions -Conditions @(
+                        (Get-NuGetUpgradeXmlAttributeValue -Node $centralNode.ParentNode -Name 'Condition')
+                        (Get-NuGetUpgradeXmlAttributeValue -Node $centralNode -Name 'Condition')
+                    )
+                    $applicableFrameworks = @(Get-NuGetUpgradeApplicableFrameworks -Condition $combinedCondition -ProjectTargetFrameworks $projectTargetFrameworks -ProjectName ([System.IO.Path]::GetFileNameWithoutExtension($project.Name)) -ProjectProperties $projectProperties)
+                    if ($applicableFrameworks.Count -eq 0) {
+                        continue
+                    }
+                    $results.Add([pscustomobject]@{
+                        ProjectPath = $project.FullName
+                        ProjectName = [System.IO.Path]::GetFileNameWithoutExtension($project.Name)
+                        RelativeProjectPath = Resolve-NuGetUpgradeRelativePath -RepoRoot $RepoRoot -Path $project.FullName
+                        PackageId = $packageId
+                        HasVersion = $false
+                        CurrentVersion = ''
+                        Condition = $combinedCondition
+                        ItemIndex = -1
+                        ApplicableTargetFrameworks = $applicableFrameworks
+                        ProjectTargetFrameworks = @($projectTargetFrameworks)
+                    })
+                }
+                break
+            }
+            if ($centralDirectory.FullName.Equals($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $centralDirectory = $centralDirectory.Parent
         }
     }
 
@@ -420,7 +486,7 @@ function Get-NuGetUpgradeVersionDefinitions {
                 $_.PackageId.Equals($packageId, [System.StringComparison]::OrdinalIgnoreCase)
             }
 
-            $validationReferences = $referencingProjects |
+            $validationReferences = @($referencingProjects |
                 Group-Object -Property ProjectPath |
                 ForEach-Object {
                     $firstReference = $_.Group | Select-Object -First 1
@@ -442,7 +508,7 @@ function Get-NuGetUpgradeVersionDefinitions {
                             TargetFrameworks = $targetFrameworks
                         }
                     }
-                }
+                })
 
             $definitions.Add([pscustomobject]@{
                 FilePath = $propsFile.FullName
@@ -471,7 +537,7 @@ function Get-NuGetUpgradeInventory {
         [string]$RepoRoot
     )
 
-    $projectReferences = Get-NuGetUpgradeProjectReferences -RepoRoot $RepoRoot
+    $projectReferences = @(Get-NuGetUpgradeProjectReferences -RepoRoot $RepoRoot)
     $versionDefinitions = Get-NuGetUpgradeVersionDefinitions -RepoRoot $RepoRoot -ProjectReferences $projectReferences
 
     return [pscustomobject]@{

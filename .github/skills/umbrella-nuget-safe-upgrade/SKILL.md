@@ -60,6 +60,8 @@ Split only applies to unconditional `PackageReference` items directly in `.cspro
 
 For Central Package Management, each `PackageVersion` condition is evaluated against the consuming project's `TargetFramework` and `MSBuildProjectName`. Only matching project/framework pairs are validated, and the exact centralized item is updated even when multiple conditional entries share a package ID and version.
 
+Unversioned `PackageReference` items declared in the nearest `Directory.Packages.props` are included in the consumer inventory, including shared test tooling. Their item and group conditions are respected, with an unconditional project `IsTestProject` value used to distinguish test consumers. An absent or conditional value remains unknown because imports can set it; affected references are validated conservatively. These central references receive the same restore and resolved-graph checks as references declared in `.csproj` files.
+
 **TFM ordering:** Condition strings and `<ItemGroup>` blocks are written in ascending semantic order: `netstandard*` (lowest) → `net4*` → `net5+` (ascending by major version). Lower TFMs always appear first in the file, matching conventional `.csproj` reading order.
 
 **Legacy-TFM major-version guard:** For `netstandard*` and `net4*` TFMs any candidate that bumps the package's major version is automatically added to the blocked set — the same as a transitive-graph violation on `net5+` TFMs. This prevents a major upgrade from silently pulling in runtime dependencies that only ship on newer .NET targets. Use `-OverrideBlockedPackageId` to bypass after manual verification.
