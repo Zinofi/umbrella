@@ -28,7 +28,7 @@ public class AppCenterLogger : ILogger
 	}
 
 	/// <inheritdoc />
-	public IDisposable BeginScope<TState>(TState state) => EmptyDisposable.Instance;
+	public IDisposable BeginScope<TState>(TState state) where TState : notnull => EmptyDisposable.Instance;
 
 	/// <inheritdoc />
 	public bool IsEnabled(LogLevel logLevel) => logLevel >= _minLevel;

@@ -137,6 +137,7 @@ function Get-NuGetUpgradeConfig {
                 'Microsoft.AspNetCore.'
                 'Microsoft.EntityFrameworkCore'
             )
+            FrameworkMajorOverrides = @{}
             Options = [pscustomobject]@{
                 AllowPrerelease = $false
             }
@@ -145,10 +146,27 @@ function Get-NuGetUpgradeConfig {
 
     $data = Read-NuGetUpgradeJsonFile -Path $path
 
+    $frameworkMajorOverrides = @{}
+    $overridesProperty = $data.PSObject.Properties['frameworkMajorOverrides']
+    if ($null -ne $overridesProperty) {
+        if ($overridesProperty.Value -isnot [pscustomobject]) {
+            throw 'frameworkMajorOverrides must be an object of legacy target frameworks and integer major versions.'
+        }
+        foreach ($property in $overridesProperty.Value.PSObject.Properties) {
+            if ($property.Name -notmatch '^net(?:standard\d+\.\d+|4\d+(?:\.\d+)?)$' -or
+                ($property.Value -isnot [int] -and $property.Value -isnot [long]) -or
+                $property.Value -lt 5 -or $property.Value -gt [int]::MaxValue) {
+                throw "Invalid frameworkMajorOverrides entry '$($property.Name)': use a legacy target framework and an integer major version of at least 5."
+            }
+            $frameworkMajorOverrides[$property.Name] = [int]$property.Value
+        }
+    }
+
     return [pscustomobject]@{
         Path = $path
         Packages = @($data.packages)
         Patterns = @($data.patterns)
+        FrameworkMajorOverrides = $frameworkMajorOverrides
         FrameworkCoupledFamilies = @(
             if ($null -ne $data.frameworkCoupledFamilies -and $data.frameworkCoupledFamilies.Count -gt 0) {
                 $data.frameworkCoupledFamilies
@@ -626,8 +644,17 @@ function Get-NuGetUpgradeAvailableVersions {
 
 function Get-NuGetUpgradeFrameworkMajor {
     param(
-        [string]$TargetFramework
+        [string]$TargetFramework,
+        [hashtable]$FrameworkMajorOverrides = @{}
     )
+
+    if ($FrameworkMajorOverrides.ContainsKey($TargetFramework)) {
+        return $FrameworkMajorOverrides[$TargetFramework]
+    }
+
+    if ($TargetFramework -match '^net4') {
+        return $null
+    }
 
     $match = [regex]::Match($TargetFramework, '^net(?<major>\d+)(?:\.\d+)?$')
     if (-not $match.Success) {
@@ -674,7 +701,8 @@ function Get-NuGetUpgradeGuardrail {
         [string]$PackageId,
         [string]$TargetFramework,
         [string]$CurrentVersion,
-        [string[]]$FrameworkCoupledFamilies
+        [string[]]$FrameworkCoupledFamilies,
+        [hashtable]$FrameworkMajorOverrides = @{}
     )
 
     $family = $FrameworkCoupledFamilies | Where-Object {
@@ -685,7 +713,7 @@ function Get-NuGetUpgradeGuardrail {
         return $null
     }
 
-    $tfmMajor = Get-NuGetUpgradeFrameworkMajor -TargetFramework $TargetFramework
+    $tfmMajor = Get-NuGetUpgradeFrameworkMajor -TargetFramework $TargetFramework -FrameworkMajorOverrides $FrameworkMajorOverrides
     if ($null -ne $tfmMajor) {
         return $tfmMajor
     }
@@ -697,7 +725,8 @@ function Test-NuGetUpgradeCandidateAgainstGuardrails {
     param(
         [pscustomobject]$Definition,
         [string]$CandidateVersion,
-        [string[]]$FrameworkCoupledFamilies
+        [string[]]$FrameworkCoupledFamilies,
+        [hashtable]$FrameworkMajorOverrides = @{}
     )
 
     $candidateInfo = ConvertTo-NuGetUpgradeVersionInfo -Version $CandidateVersion
@@ -705,7 +734,7 @@ function Test-NuGetUpgradeCandidateAgainstGuardrails {
 
     foreach ($validation in @($Definition.ValidationReferences)) {
         foreach ($framework in @($validation.TargetFrameworks)) {
-            $maxMajor = Get-NuGetUpgradeGuardrail -PackageId $Definition.PackageId -TargetFramework $framework -CurrentVersion $Definition.CurrentVersion -FrameworkCoupledFamilies $FrameworkCoupledFamilies
+            $maxMajor = Get-NuGetUpgradeGuardrail -PackageId $Definition.PackageId -TargetFramework $framework -CurrentVersion $Definition.CurrentVersion -FrameworkCoupledFamilies $FrameworkCoupledFamilies -FrameworkMajorOverrides $FrameworkMajorOverrides
             if ($null -ne $maxMajor -and $candidateInfo.Major -gt $maxMajor) {
                 $violations.Add([pscustomobject]@{
                     Project = $validation.RelativeProjectPath
@@ -731,6 +760,32 @@ function Get-NuGetUpgradeFileEncoding {
     }
 
     return [System.Text.UTF8Encoding]::new($false)
+}
+
+function Write-NuGetUpgradeFileContent {
+    param(
+        [string]$Path,
+        [string]$Content,
+        [System.Text.Encoding]$Encoding
+    )
+
+    for ($attempt = 0; ; $attempt++) {
+        try {
+            [System.IO.File]::WriteAllText($Path, $Content, $Encoding)
+            return
+        }
+        catch {
+            $exception = $_.Exception.GetBaseException()
+            $errorCode = $exception.HResult -band 0xFFFF
+            if ($exception -isnot [System.IO.IOException] -or $errorCode -notin @(32, 33) -or $attempt -ge 39) {
+                throw
+            }
+
+            # MSBuild or a file watcher can briefly hold a Windows sharing lock.
+            # Retry candidate writes and rollback alike, but bound the wait to ten seconds.
+            Start-Sleep -Milliseconds 250
+        }
+    }
 }
 
 function Set-NuGetUpgradeVersionInFile {
@@ -787,7 +842,7 @@ function Set-NuGetUpgradeVersionInFile {
     $replacement = $match.Value -replace ([regex]::Escape('Version="' + $CurrentVersion + '"')), ('Version="' + $NewVersion + '"')
     $updatedContent = $content.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
     $encoding = Get-NuGetUpgradeFileEncoding -Path $FilePath
-    [System.IO.File]::WriteAllText($FilePath, $updatedContent, $encoding)
+    Write-NuGetUpgradeFileContent -Path $FilePath -Content $updatedContent -Encoding $encoding
 }
 
 function Invoke-NuGetUpgradeRestore {
@@ -847,7 +902,8 @@ function Test-NuGetUpgradeResolvedPackages {
     param(
         [object[]]$ResolvedPackages,
         [string]$TargetFramework,
-        [string[]]$FrameworkCoupledFamilies
+        [string[]]$FrameworkCoupledFamilies,
+        [hashtable]$FrameworkMajorOverrides = @{}
     )
 
     $violations = New-Object System.Collections.Generic.List[object]
@@ -861,7 +917,7 @@ function Test-NuGetUpgradeResolvedPackages {
             continue
         }
 
-        $maxMajor = Get-NuGetUpgradeFrameworkMajor -TargetFramework $TargetFramework
+        $maxMajor = Get-NuGetUpgradeFrameworkMajor -TargetFramework $TargetFramework -FrameworkMajorOverrides $FrameworkMajorOverrides
         if ($null -eq $maxMajor) {
             continue
         }
@@ -907,7 +963,7 @@ function Remove-NuGetUpgradePackageReferenceLine {
 
     $updatedContent = $regex.Replace($content, '', 1)
     $encoding = Get-NuGetUpgradeFileEncoding -Path $FilePath
-    [System.IO.File]::WriteAllText($FilePath, $updatedContent, $encoding)
+    Write-NuGetUpgradeFileContent -Path $FilePath -Content $updatedContent -Encoding $encoding
 }
 
 function Add-NuGetUpgradePackageReferenceBlock {
@@ -932,7 +988,7 @@ function Add-NuGetUpgradePackageReferenceBlock {
 
     $updatedContent = $content.Insert($match.Index, $block)
     $encoding = Get-NuGetUpgradeFileEncoding -Path $FilePath
-    [System.IO.File]::WriteAllText($FilePath, $updatedContent, $encoding)
+    Write-NuGetUpgradeFileContent -Path $FilePath -Content $updatedContent -Encoding $encoding
 }
 
 function Split-NuGetUpgradePackageReference {

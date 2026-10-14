@@ -423,7 +423,7 @@ public static class IDistributedCacheExtensions
 		{
 			string? result = cache.GetString(key);
 
-			if (!string.IsNullOrWhiteSpace(result))
+			if (result is not null && !string.IsNullOrWhiteSpace(result))
 			{
 				var item = UmbrellaStatics.DeserializeJson<TItem>(result);
 
@@ -451,7 +451,7 @@ public static class IDistributedCacheExtensions
 		{
 			string? result = await cache.GetStringAsync(key, cancellationToken).ConfigureAwait(false);
 
-			if (!string.IsNullOrWhiteSpace(result))
+			if (result is not null && !string.IsNullOrWhiteSpace(result))
 			{
 				var item = UmbrellaStatics.DeserializeJson<TItem>(result);
 

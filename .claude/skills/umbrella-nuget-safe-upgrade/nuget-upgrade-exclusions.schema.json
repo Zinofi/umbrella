@@ -5,6 +5,9 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "$schema": {
+      "type": "string"
+    },
     "packages": {
       "type": "array",
       "items": {
@@ -58,6 +61,19 @@
         "Microsoft.AspNetCore.",
         "Microsoft.EntityFrameworkCore"
       ]
+    },
+    "frameworkMajorOverrides": {
+      "description": "Explicit framework-coupled package major baselines for legacy target frameworks. These also allow package major upgrades after restore and resolved-graph validation.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^net(?:standard\\d+\\.\\d+|4\\d+(?:\\.\\d+)?)$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 2147483647
+      },
+      "default": {}
     },
     "options": {
       "type": "object",

@@ -35,11 +35,7 @@ public class ApplicationInsightsLogger : ILogger
 	}
 
 	/// <inheritdoc />
-#if NET8_0_OR_GREATER
 	public IDisposable? BeginScope<TState>(TState state) where TState : notnull => EmptyDisposable.Instance;
-#else
-	public IDisposable BeginScope<TState>(TState state) => EmptyDisposable.Instance;
-#endif
 
 	/// <inheritdoc />
 	public bool IsEnabled(LogLevel logLevel) => _telemetryClient is not null && logLevel >= _minLevel && _telemetryClient.IsEnabled();

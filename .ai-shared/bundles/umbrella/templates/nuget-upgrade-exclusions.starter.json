@@ -8,6 +8,10 @@
     "Microsoft.EntityFrameworkCore",
     "System.Security.Cryptography.Xml"
   ],
+  "frameworkMajorOverrides": {
+    "netstandard2.0": 10,
+    "net462": 10
+  },
   "options": {
     "allowPrerelease": false
   }

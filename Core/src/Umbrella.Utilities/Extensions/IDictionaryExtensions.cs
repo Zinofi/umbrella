@@ -30,7 +30,7 @@ public static class IDictionaryExtensions
 		{
 			foreach (string? value in parameter.Value)
 			{
-				if (string.IsNullOrEmpty(value))
+				if (value is null || value.Length == 0)
 					continue;
 
 				if (!firstParameter)

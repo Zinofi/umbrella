@@ -75,7 +75,9 @@ public class FrontEndCompressionMiddleware : OwinMiddleware
 			throw new ArgumentNullException(nameof(hostingEnvironment));
 
 		// File Provider
-		FileProvider = new PhysicalFileProvider(hostingEnvironment.MapPath("~/"));
+		string rootPath = hostingEnvironment.MapPath("~/")
+			?? throw new InvalidOperationException("The hosting environment could not resolve the application root path.");
+		FileProvider = new PhysicalFileProvider(rootPath);
 	}
 	#endregion
 

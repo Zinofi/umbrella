@@ -87,6 +87,7 @@ $report = [ordered]@{
         projects = @($Project | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         overrideBlockedPackageIds = @($OverrideBlockedPackageId | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         allowPrerelease = $effectiveAllowPrerelease
+        frameworkMajorOverrides = $config.FrameworkMajorOverrides
     }
     successful = New-Object System.Collections.Generic.List[object]
     skipped = New-Object System.Collections.Generic.List[object]
@@ -139,7 +140,7 @@ foreach ($definition in $definitions) {
 
     foreach ($candidate in $availableVersions) {
         $candidateVersion = $candidate.Original
-        $candidateGuardrailViolations = Test-NuGetUpgradeCandidateAgainstGuardrails -Definition $definition -CandidateVersion $candidateVersion -FrameworkCoupledFamilies $config.FrameworkCoupledFamilies
+        $candidateGuardrailViolations = Test-NuGetUpgradeCandidateAgainstGuardrails -Definition $definition -CandidateVersion $candidateVersion -FrameworkCoupledFamilies $config.FrameworkCoupledFamilies -FrameworkMajorOverrides $config.FrameworkMajorOverrides
         $isOverride = $overrideIds -contains $definition.PackageId.ToLowerInvariant()
 
         # Frameworks where the candidate's own major exceeds the coupled-family cap. Treat these
@@ -209,7 +210,7 @@ foreach ($definition in $definitions) {
             foreach ($validation in @($definition.ValidationReferences)) {
                 foreach ($framework in @($validation.TargetFrameworks)) {
                     $resolvedPackages = Get-NuGetUpgradeResolvedPackages -ProjectPath $validation.ProjectPath -TargetFramework $framework
-                    $violations = @(Test-NuGetUpgradeResolvedPackages -ResolvedPackages $resolvedPackages -TargetFramework $framework -FrameworkCoupledFamilies $config.FrameworkCoupledFamilies)
+                    $violations = @(Test-NuGetUpgradeResolvedPackages -ResolvedPackages $resolvedPackages -TargetFramework $framework -FrameworkCoupledFamilies $config.FrameworkCoupledFamilies -FrameworkMajorOverrides $config.FrameworkMajorOverrides)
                     if ($violations.Count -gt 0) {
                         if (-not $graphViolationsByFramework.ContainsKey($framework)) {
                             $graphViolationsByFramework[$framework] = New-Object System.Collections.Generic.List[object]
@@ -230,14 +231,16 @@ foreach ($definition in $definitions) {
 
             $graphBlockedFrameworks = @(Sort-NuGetUpgradeTargetFrameworks -Frameworks $graphViolationsByFramework.Keys)
 
-            # Block legacy TFMs (netstandard*, net4*) from major-version bumps: the package may
-            # have dropped legacy TFM support or pulled in transitive dependencies that target a
-            # newer runtime generation. Callers can override via -OverrideBlockedPackageId.
+            # Legacy TFMs with an explicit framework-major baseline allow package major bumps
+            # after restore and graph validation. Unconfigured legacy TFMs retain their guard.
             $candidateMajorVersion = (ConvertTo-NuGetUpgradeVersionInfo -Version $candidateVersion).Major
             $currentMajorVersion   = (ConvertTo-NuGetUpgradeVersionInfo -Version $definition.CurrentVersion).Major
             $legacyMajorBumpFrameworks = @()
             if ($candidateMajorVersion -gt $currentMajorVersion) {
-                $legacyMajorBumpFrameworks = @($allValidationFrameworks | Where-Object { $_ -match '^netstandard' -or $_ -match '^net4' })
+                $legacyMajorBumpFrameworks = @($allValidationFrameworks | Where-Object {
+                    ($_ -match '^netstandard' -or $_ -match '^net4') -and
+                    $null -eq (Get-NuGetUpgradeFrameworkMajor -TargetFramework $_ -FrameworkMajorOverrides $config.FrameworkMajorOverrides)
+                })
                 if ($legacyMajorBumpFrameworks.Count -gt 0) {
                     $graphBlockedFrameworks = @(Sort-NuGetUpgradeTargetFrameworks -Frameworks (
                         @($graphBlockedFrameworks + $legacyMajorBumpFrameworks) | Select-Object -Unique
@@ -264,7 +267,7 @@ foreach ($definition in $definitions) {
 
                 if ($canSplit) {
                     $splitEncoding = Get-NuGetUpgradeFileEncoding -Path $definition.FilePath
-                    [System.IO.File]::WriteAllText($definition.FilePath, $originalContent, $splitEncoding)
+                    Write-NuGetUpgradeFileContent -Path $definition.FilePath -Content $originalContent -Encoding $splitEncoding
                     if ($Mode -eq 'Apply') {
                         Split-NuGetUpgradePackageReference -FilePath $definition.FilePath -ItemName $definition.ItemName -PackageId $definition.PackageId -CurrentVersion $definition.CurrentVersion -NewVersion $candidateVersion -UpgradeFrameworks $graphAllowedFrameworks -KeepFrameworks $graphBlockedFrameworks
                     }
@@ -310,7 +313,7 @@ foreach ($definition in $definitions) {
 
                 if ($Mode -eq 'Analyze') {
                     $encoding = Get-NuGetUpgradeFileEncoding -Path $definition.FilePath
-                    [System.IO.File]::WriteAllText($definition.FilePath, $originalContent, $encoding)
+                    Write-NuGetUpgradeFileContent -Path $definition.FilePath -Content $originalContent -Encoding $encoding
                 }
             }
 
@@ -319,7 +322,7 @@ foreach ($definition in $definitions) {
         finally {
             if ($null -eq $selectedCandidate) {
                 $encoding = Get-NuGetUpgradeFileEncoding -Path $definition.FilePath
-                [System.IO.File]::WriteAllText($definition.FilePath, $originalContent, $encoding)
+                Write-NuGetUpgradeFileContent -Path $definition.FilePath -Content $originalContent -Encoding $encoding
             }
         }
     }

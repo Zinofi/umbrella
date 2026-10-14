@@ -21,6 +21,143 @@ $testRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('umbre
 [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
 try {
+    if ($env:OS -eq 'Windows_NT') {
+        Add-Type -TypeDefinition @'
+using System.IO;
+using System.Threading;
+public static class NuGetUpgradeLockFixture {
+    public static Thread HoldFile(string path) {
+        var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var thread = new Thread(() => { Thread.Sleep(500); stream.Dispose(); });
+        thread.Start();
+        return thread;
+    }
+}
+'@
+        $lockedFilePath = Join-Path $testRoot 'locked.props'
+        [System.IO.File]::WriteAllText($lockedFilePath, 'before')
+        $lockThread = [NuGetUpgradeLockFixture]::HoldFile($lockedFilePath)
+        Write-NuGetUpgradeFileContent -Path $lockedFilePath -Content 'after' -Encoding ([System.Text.UTF8Encoding]::new($true))
+        $lockThread.Join()
+        $writtenBytes = [System.IO.File]::ReadAllBytes($lockedFilePath)
+        Assert-NuGetUpgradeTest -Condition ((Get-Content -LiteralPath $lockedFilePath -Raw) -eq 'after') -Message 'A transient sharing lock prevented the package-file write.'
+        Assert-NuGetUpgradeTest -Condition ($writtenBytes[0] -eq 0xEF -and $writtenBytes[1] -eq 0xBB -and $writtenBytes[2] -eq 0xBF) -Message 'The retry writer did not preserve the requested encoding.'
+    }
+    $nonTransientFailure = $false
+    try { Write-NuGetUpgradeFileContent -Path $testRoot -Content 'invalid target' -Encoding ([System.Text.UTF8Encoding]::new($false)) }
+    catch { $nonTransientFailure = $true }
+    Assert-NuGetUpgradeTest -Condition $nonTransientFailure -Message 'A non-sharing write failure was suppressed.'
+
+    $policyTestRoot = Join-Path -Path $testRoot -ChildPath 'framework-policy'
+    [System.IO.Directory]::CreateDirectory($policyTestRoot) | Out-Null
+    $policyConfigPath = Join-Path $policyTestRoot 'nuget-upgrade-exclusions.json'
+    $policyConfigContent = '{"packages":[],"patterns":[],"frameworkCoupledFamilies":["Microsoft.Extensions.","System.Text.Json"],"frameworkMajorOverrides":{"netstandard2.0":10,"net462":10},"options":{"allowPrerelease":false}}'
+    [System.IO.File]::WriteAllText($policyConfigPath, $policyConfigContent, [System.Text.UTF8Encoding]::new($false))
+    $policyConfig = Get-NuGetUpgradeConfig -RepoRoot $policyTestRoot
+    $policyArguments = @{
+        FrameworkCoupledFamilies = $policyConfig.FrameworkCoupledFamilies
+        FrameworkMajorOverrides = $policyConfig.FrameworkMajorOverrides
+    }
+    Assert-NuGetUpgradeTest -Condition ($policyConfig.FrameworkMajorOverrides['netstandard2.0'] -eq 10) -Message 'The configured netstandard2.0 baseline was not loaded.'
+    Assert-NuGetUpgradeTest -Condition ($policyConfig.FrameworkMajorOverrides['net462'] -eq 10) -Message 'The configured net462 baseline was not loaded.'
+    foreach ($policyFramework in @('netstandard2.0', 'net462', 'net8.0', 'net9.0', 'net10.0')) {
+        $policyCap = Get-NuGetUpgradeGuardrail -PackageId 'System.Text.Json' -TargetFramework $policyFramework -CurrentVersion '6.0.11' @policyArguments
+        $expectedCap = if ($policyFramework -eq 'net8.0') { 8 } elseif ($policyFramework -eq 'net9.0') { 9 } else { 10 }
+        Assert-NuGetUpgradeTest -Condition ($policyCap -eq $expectedCap) -Message "Incorrect direct-package cap for $policyFramework."
+        $policyDefinition = [pscustomobject]@{
+            PackageId = 'System.Text.Json'
+            CurrentVersion = '6.0.11'
+            ValidationReferences = @([pscustomobject]@{ RelativeProjectPath = 'Policy.csproj'; TargetFrameworks = @($policyFramework) })
+        }
+        $directViolations = @(Test-NuGetUpgradeCandidateAgainstGuardrails -Definition $policyDefinition -CandidateVersion '10.0.5' @policyArguments)
+        $expectedViolationCount = if ($expectedCap -lt 10) { 1 } else { 0 }
+        Assert-NuGetUpgradeTest -Condition ($directViolations.Count -eq $expectedViolationCount) -Message "Incorrect direct-package decision for $policyFramework."
+        $resolvedPolicyPackages = @(
+            [pscustomobject]@{ PackageId = 'Microsoft.Extensions.Logging.Abstractions'; Version = '10.0.5'; Kind = 'Transitive' }
+            [pscustomobject]@{ PackageId = 'Microsoft.Extensions.DependencyInjection.Abstractions'; Version = '10.0.5'; Kind = 'Transitive' }
+            [pscustomobject]@{ PackageId = 'System.Text.Json'; Version = '10.0.5'; Kind = 'Transitive' }
+        )
+        $transitiveViolations = @(Test-NuGetUpgradeResolvedPackages -ResolvedPackages $resolvedPolicyPackages -TargetFramework $policyFramework @policyArguments)
+        Assert-NuGetUpgradeTest -Condition ($transitiveViolations.Count -eq (3 * $expectedViolationCount)) -Message "Incorrect transitive-package decision for $policyFramework."
+    }
+    $futurePackage = @([pscustomobject]@{ PackageId = 'System.Text.Json'; Version = '11.0.0'; Kind = 'Transitive' })
+    foreach ($legacyFramework in @('netstandard2.0', 'net462')) {
+        $futureViolations = @(Test-NuGetUpgradeResolvedPackages -ResolvedPackages $futurePackage -TargetFramework $legacyFramework @policyArguments)
+        Assert-NuGetUpgradeTest -Condition ($futureViolations.Count -eq 1 -and $futureViolations[0].MaxAllowedMajor -eq 10) -Message "The $legacyFramework transitive cap allowed major 11."
+        $policyDefinition.ValidationReferences[0].TargetFrameworks = @($legacyFramework)
+        $futureDirectViolations = @(Test-NuGetUpgradeCandidateAgainstGuardrails -Definition $policyDefinition -CandidateVersion '11.0.0' @policyArguments)
+        Assert-NuGetUpgradeTest -Condition ($futureDirectViolations.Count -eq 1) -Message "The $legacyFramework direct framework-coupled cap allowed major 11."
+    }
+    $legacyCap = Get-NuGetUpgradeGuardrail -PackageId 'System.Text.Json' -TargetFramework 'net48' -CurrentVersion '6.0.11' @policyArguments
+    Assert-NuGetUpgradeTest -Condition ($legacyCap -eq 6) -Message 'An unconfigured .NET Framework target lost its existing direct-package cap.'
+    $oldConfigContent = $policyConfigContent.Replace(',"frameworkMajorOverrides":{"netstandard2.0":10,"net462":10}', '')
+    [System.IO.File]::WriteAllText($policyConfigPath, $oldConfigContent, [System.Text.UTF8Encoding]::new($false))
+    $oldConfig = Get-NuGetUpgradeConfig -RepoRoot $policyTestRoot
+    Assert-NuGetUpgradeTest -Condition ($oldConfig.FrameworkMajorOverrides.Count -eq 0) -Message 'An existing configuration acquired an implicit framework override.'
+    $missingConfig = Get-NuGetUpgradeConfig -RepoRoot $testRoot
+    Assert-NuGetUpgradeTest -Condition ($missingConfig.FrameworkMajorOverrides.Count -eq 0) -Message 'A missing configuration acquired an implicit framework override.'
+    foreach ($invalidOverride in @('{"net8.0":10}', '{"netstandard2.0":4}', '{"netstandard2.0":10.5}', '{"netstandard2.0":"10"}', 'null')) {
+        $invalidConfigContent = $policyConfigContent.Replace('{"netstandard2.0":10,"net462":10}', $invalidOverride)
+        [System.IO.File]::WriteAllText($policyConfigPath, $invalidConfigContent, [System.Text.UTF8Encoding]::new($false))
+        $invalidConfigRejected = $false
+        try { $null = Get-NuGetUpgradeConfig -RepoRoot $policyTestRoot } catch { $invalidConfigRejected = $true }
+        Assert-NuGetUpgradeTest -Condition $invalidConfigRejected -Message "Invalid framework override was accepted: $invalidOverride."
+    }
+    [System.IO.File]::WriteAllText($policyConfigPath, $policyConfigContent, [System.Text.UTF8Encoding]::new($false))
+
+    # Exercise the full workflow without network access, including major-bump policy,
+    # graph-cap rejection, failed restore rollback, and framework-specific splitting.
+    $workflowTestRoot = Join-Path $testRoot 'workflow-policy'
+    [System.IO.Directory]::CreateDirectory($workflowTestRoot) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Invoke-NuGetSafeUpgrade.ps1') -Destination $workflowTestRoot
+    $workflowStubs = @'
+function Get-NuGetUpgradeAvailableVersions { param([string]$PackageId) return @('2.0.0') }
+function Invoke-NuGetUpgradeRestore {
+    param([string]$Path)
+    if (Test-Path -LiteralPath (Join-Path (Split-Path $Path -Parent) 'fail-restore')) {
+        return [pscustomobject]@{ ExitCode = 1; Output = 'NU1202: No assets compatible with the requested target framework.' }
+    }
+    return [pscustomobject]@{ ExitCode = 0; Output = 'Restore succeeded.' }
+}
+function Get-NuGetUpgradeResolvedPackages {
+    param([string]$ProjectPath, [string]$TargetFramework)
+    $versionPath = Join-Path (Split-Path $ProjectPath -Parent) 'resolved-version.txt'
+    return @([pscustomobject]@{ PackageId = 'System.Text.Json'; Version = (Get-Content -LiteralPath $versionPath -Raw).Trim(); Kind = 'Transitive' })
+}
+'@
+    $workflowCommon = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'NuGetSafeUpgrade.Common.ps1') -Raw) + [Environment]::NewLine + $workflowStubs
+    [System.IO.File]::WriteAllText((Join-Path $workflowTestRoot 'NuGetSafeUpgrade.Common.ps1'), $workflowCommon, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $workflowTestRoot 'Policy.sln'), '', [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $workflowTestRoot 'nuget-upgrade-exclusions.json'), $policyConfigContent, [System.Text.UTF8Encoding]::new($false))
+    $workflowProjectPath = Join-Path $workflowTestRoot 'Policy.csproj'
+    $workflowProjectContent = '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>netstandard2.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include="Example.Package" Version="1.0.0" /></ItemGroup></Project>'
+    [System.IO.File]::WriteAllText($workflowProjectPath, $workflowProjectContent, [System.Text.UTF8Encoding]::new($false))
+    $workflowReportPath = Join-Path $workflowTestRoot 'report.json'
+    $resolvedVersionPath = Join-Path $workflowTestRoot 'resolved-version.txt'
+    $testPowerShellPath = (Get-Process -Id $PID).Path
+    foreach ($workflowScenario in @('compatible', 'above-cap', 'incompatible-assets', 'unconfigured-legacy', 'net462-compatible', 'net462-above-cap', 'net462-incompatible-assets', 'net462-unconfigured-legacy', 'framework-split')) {
+        $scenarioConfig = if ($workflowScenario -like '*unconfigured-legacy') { $oldConfigContent } else { $policyConfigContent }
+        [System.IO.File]::WriteAllText((Join-Path $workflowTestRoot 'nuget-upgrade-exclusions.json'), $scenarioConfig, [System.Text.UTF8Encoding]::new($false))
+        $scenarioProject = if ($workflowScenario -eq 'framework-split') { $workflowProjectContent.Replace('<TargetFramework>netstandard2.0</TargetFramework>', '<TargetFrameworks>netstandard2.0;net462;net8.0;net9.0;net10.0</TargetFrameworks>') } elseif ($workflowScenario -like 'net462-*') { $workflowProjectContent.Replace('netstandard2.0', 'net462') } else { $workflowProjectContent }
+        [System.IO.File]::WriteAllText($workflowProjectPath, $scenarioProject, [System.Text.UTF8Encoding]::new($false))
+        $resolvedVersion = if ($workflowScenario -like '*above-cap') { '11.0.0' } else { '10.0.5' }
+        [System.IO.File]::WriteAllText($resolvedVersionPath, $resolvedVersion, [System.Text.UTF8Encoding]::new($false))
+        $failRestorePath = Join-Path $workflowTestRoot 'fail-restore'
+        if ($workflowScenario -like '*incompatible-assets') { [System.IO.File]::WriteAllText($failRestorePath, '') }
+        elseif (Test-Path -LiteralPath $failRestorePath) { Remove-Item -LiteralPath $failRestorePath }
+        $workflowOutput = & $testPowerShellPath -NoProfile -ExecutionPolicy Bypass -File (Join-Path $workflowTestRoot 'Invoke-NuGetSafeUpgrade.ps1') -Mode Analyze -RepoRoot $workflowTestRoot -PackageId 'Example.Package' -ReportPath $workflowReportPath 2>&1
+        Assert-NuGetUpgradeTest -Condition ($LASTEXITCODE -eq 0) -Message ("Workflow scenario $workflowScenario failed: " + ($workflowOutput -join [Environment]::NewLine))
+        $workflowReport = Read-NuGetUpgradeJsonFile -Path $workflowReportPath
+        $scenarioAllowed = $workflowScenario -eq 'compatible' -or $workflowScenario -eq 'net462-compatible' -or $workflowScenario -eq 'framework-split'
+        Assert-NuGetUpgradeTest -Condition (($workflowReport.successful.Count -eq 1) -eq $scenarioAllowed) -Message "Unexpected upgrade decision for $workflowScenario."
+        Assert-NuGetUpgradeTest -Condition (($workflowReport.blocked.Count -eq 1) -eq (-not $scenarioAllowed)) -Message "Unexpected blocked decision for $workflowScenario."
+        Assert-NuGetUpgradeTest -Condition ((Get-Content -LiteralPath $workflowProjectPath -Raw) -eq $scenarioProject) -Message "Analyze did not restore the original project for $workflowScenario."
+        if ($workflowScenario -eq 'framework-split') {
+            Assert-NuGetUpgradeTest -Condition (($workflowReport.successful[0].upgradeFrameworks -join ',') -eq 'netstandard2.0,net462,net10.0') -Message 'The framework split did not allow netstandard2.0, net462 and net10.0.'
+            Assert-NuGetUpgradeTest -Condition (($workflowReport.successful[0].keepFrameworks -join ',') -eq 'net8.0,net9.0') -Message 'The framework split changed .NET 8 or 9 dependencies.'
+        }
+    }
+
     $commentTestRoot = Join-Path -Path $testRoot -ChildPath 'commented-item'
     [System.IO.Directory]::CreateDirectory($commentTestRoot) | Out-Null
     $commentTestPath = Join-Path -Path $commentTestRoot -ChildPath 'Directory.Packages.props'
