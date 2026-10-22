@@ -75,6 +75,13 @@ public partial class UmbrellaFileImagePreviewUpload : ComponentBase
 	public int? MaxFileSizeBytes { get; set; } = 512000;
 
 	/// <summary>
+	/// Gets or sets the progress source forwarded to <see cref="UmbrellaFileUpload"/>.
+	/// Defaults to source-stream reads. Handler-reported mode uses <see cref="UmbrellaFileUploadRequestEventArgs.UploadProgress"/>.
+	/// </summary>
+	[Parameter]
+	public UmbrellaFileUploadProgressMode ProgressMode { get; set; }
+
+	/// <summary>
 	/// Gets or sets whether a warning message should be shown to the user when they clear the current file selection.
 	/// </summary>
 	[Parameter]
@@ -295,7 +302,13 @@ public partial class UmbrellaFileImagePreviewUpload : ComponentBase
 
 			IOperationResult result = await OnRequestUpload(args);
 
-			StateHasChanged();
+			if (!args.UploadCancellationToken.IsCancellationRequested)
+			{
+				if (result.IsSuccess && args.RegisterSuccessCallback is { } register)
+					register(StateHasChanged);
+				else
+					StateHasChanged();
+			}
 
 			return result;
 		}

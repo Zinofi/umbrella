@@ -1,4 +1,5 @@
 ﻿
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.Extensions.Logging;
 using Umbrella.AspNetCore.Blazor.Components.Dialog.Abstractions;
@@ -14,7 +15,9 @@ namespace Umbrella.AspNetCore.Blazor.Components.FileUpload;
 /// <seealso cref="IDisposable" />
 public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 {
-	private CancellationTokenSource? _cancellationTokenSource;
+	[SuppressMessage("Usage", "CA2213:Disposable fields should be disposed", Justification = "UploadClickAsync owns and disposes the attempt in its finally block after the handler and refresh loop finish. Component disposal only cancels it.")]
+	private UmbrellaFileUploadAttempt? _uploadAttempt;
+	private bool _disposed;
 
 	[Inject]
 	private ILogger<UmbrellaFileUpload> Logger { get; set; } = null!;
@@ -22,7 +25,17 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 	[Inject]
 	private IUmbrellaDialogService DialogUtility { get; set; } = null!;
 
-	private int UploadPercentage { get; set; }
+	internal int UploadPercentage { get; private set; }
+	internal Task ProgressRefreshTask => _uploadAttempt?.RefreshTask ?? Task.CompletedTask;
+
+	/// <summary>
+	/// Gets or sets the progress source. Defaults to source-stream reads, which may precede network transmission.
+	/// Select <see cref="UmbrellaFileUploadProgressMode.HandlerReported"/> to use transport byte counts
+	/// reported by the handler through <see cref="UmbrellaFileUploadRequestEventArgs.UploadProgress"/>.
+	/// Changes apply to the next upload attempt.
+	/// </summary>
+	[Parameter]
+	public UmbrellaFileUploadProgressMode ProgressMode { get; set; }
 
 	/// <summary>
 	/// Gets or sets the maximum file size in bytes that can be uploaded.
@@ -60,7 +73,7 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 
 	private string Id { get; } = Guid.NewGuid().ToString();
 	private IBrowserFile? SelectedFile { get; set; }
-	private UmbrellaFileUploadStatus Status { get; set; }
+	internal UmbrellaFileUploadStatus Status { get; private set; }
 	private string? AcceptTypesMessage { get; set; }
 	private int? MaxFileSizeMegaBytes { get; set; }
 
@@ -95,10 +108,11 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 		}
 	}
 
-	private async Task OnFileSelectedAsync(InputFileChangeEventArgs args)
+	internal async Task OnFileSelectedAsync(InputFileChangeEventArgs args)
 	{
 		try
 		{
+			Cleanup(UmbrellaFileUploadStatus.None);
 			SelectedFile = args.File;
 
 			if (SelectedFile is not null)
@@ -122,8 +136,15 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 		}
 	}
 
-	private async Task UploadClickAsync()
+	[SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "Exceptions from abandoned upload handlers must not affect a newer attempt or a disposed component.")]
+	[SuppressMessage("Reliability", "CA2025:Do not pass IDisposable instances into unawaited tasks", Justification = "The refresh task is cancelled and awaited in the inner finally before the stream is disposed; the attempt is disposed in the outer finally.")]
+	internal async Task UploadClickAsync()
 	{
+		if (_disposed || _uploadAttempt is not null)
+			return;
+
+		UmbrellaFileUploadAttempt? attempt = null;
+
 		try
 		{
 			UploadPercentage = 0;
@@ -134,38 +155,108 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 			if (OnRequestUpload is null)
 				throw new InvalidOperationException($"The {OnRequestUpload} property must have an assigned delegate.");
 
-			_cancellationTokenSource = new CancellationTokenSource();
+			attempt = new UmbrellaFileUploadAttempt(SelectedFile.Size, ProgressMode);
+			_uploadAttempt = attempt;
 			Status = UmbrellaFileUploadStatus.Uploading;
+			StateHasChanged();
 
-			using Stream stream = SelectedFile.OpenReadStream(MaxFileSizeBytes ?? 512000, _cancellationTokenSource.Token);
-
-			await using Timer timer = new(_ => _ = InvokeAsync(() =>
+			IOperationResult? result;
+			using (Stream stream = SelectedFile.OpenReadStream(MaxFileSizeBytes ?? 512000, attempt.Cancellation.Token))
 			{
-				UploadPercentage = (int)Math.Round(stream.Position / stream.Length * 100d, MidpointRounding.AwayFromZero);
-				StateHasChanged();
-			}),
-			null,
-			TimeSpan.FromMilliseconds(500),
-			TimeSpan.FromMilliseconds(500));
+				attempt.Stream = stream;
+				Task refreshTask = RefreshProgressAsync(attempt);
+				attempt.RefreshTask = refreshTask;
 
-			IOperationResult? result = await OnRequestUpload(new UmbrellaFileUploadRequestEventArgs(stream, SelectedFile.Name, SelectedFile.ContentType, _cancellationTokenSource.Token));
+				try
+				{
+					result = await OnRequestUpload(new UmbrellaFileUploadRequestEventArgs(stream, SelectedFile.Name, SelectedFile.ContentType,
+						attempt.Cancellation.Token, ProgressMode is UmbrellaFileUploadProgressMode.HandlerReported ? attempt : null)
+					{
+						RegisterSuccessCallback = callback => attempt.OnSucceeded += callback
+					});
+				}
+				finally
+				{
+					attempt.StopReporting();
+					await refreshTask;
+				}
+			}
+
+			if (!IsCurrentAttempt(attempt))
+				return;
 
 			if (result is { IsSuccess: true })
 			{
+				UploadPercentage = 100;
 				Cleanup(UmbrellaFileUploadStatus.Uploaded);
+				StateHasChanged();
+				// Success is now committed. A wrapper may safely replace and dispose this uploader.
+				attempt.OnSucceeded?.Invoke();
 				await DialogUtility.ShowSuccessMessageAsync("Your file has been uploaded successfully.");
 			}
 			else
 			{
 				Cleanup(UmbrellaFileUploadStatus.Selected);
+				StateHasChanged();
 				await DialogUtility.ShowOperationResultErrorMessageAsync(result);
 			}
+		}
+		catch (OperationCanceledException) when (attempt?.Cancellation.IsCancellationRequested is true)
+		{
+			// Cancellation already detached this attempt and restored the selection.
+		}
+		catch (Exception) when (attempt is not null && !IsCurrentAttempt(attempt))
+		{
+			// An abandoned handler must not affect a newer upload or a disposed component.
 		}
 		catch (Exception exc) when (Logger.WriteError(exc))
 		{
 			Cleanup(UmbrellaFileUploadStatus.Selected);
+			StateHasChanged();
 			await DialogUtility.ShowDangerMessageAsync("There has been a problem uploading the selected file. Please try again.");
 		}
+		finally
+		{
+			attempt?.Dispose();
+			if (!_disposed)
+				StateHasChanged();
+		}
+	}
+
+	private bool IsCurrentAttempt(UmbrellaFileUploadAttempt attempt) => !_disposed && ReferenceEquals(_uploadAttempt, attempt);
+
+	private async Task RefreshProgressAsync(UmbrellaFileUploadAttempt attempt)
+	{
+		using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+		CancellationToken token = attempt.RefreshCancellation.Token;
+
+		try
+		{
+			while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+			{
+				await InvokeAsync(() =>
+				{
+					if (IsCurrentAttempt(attempt) && !token.IsCancellationRequested)
+						SampleUploadProgress();
+				}).ConfigureAwait(false);
+			}
+		}
+		catch (OperationCanceledException) when (token.IsCancellationRequested)
+		{
+		}
+	}
+
+	internal void SampleUploadProgress()
+	{
+		if (_uploadAttempt is not { } attempt || !IsCurrentAttempt(attempt) || attempt.RefreshCancellation.IsCancellationRequested)
+			return;
+
+		int percentage = attempt.GetPercentage();
+		if (percentage == UploadPercentage)
+			return;
+
+		UploadPercentage = percentage;
+		StateHasChanged();
 	}
 
 	private async Task ClearClickAsync()
@@ -188,8 +279,10 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 		}
 	}
 
-	private async Task CancelClickAsync()
+	[SuppressMessage("Usage", "VSTHRD003:Avoid awaiting foreign Tasks", Justification = "The refresh loop belongs to this component and is cancelled before awaiting it; dispatcher work is awaited asynchronously.")]
+	internal async Task CancelClickAsync()
 	{
+		UmbrellaFileUploadAttempt? attempt = _uploadAttempt;
 		try
 		{
 			if (ShowCancelWarning)
@@ -200,7 +293,11 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 					return;
 			}
 
-			Cleanup(UmbrellaFileUploadStatus.Selected);
+			if (attempt is not null && IsCurrentAttempt(attempt))
+			{
+				Cleanup(UmbrellaFileUploadStatus.Selected);
+				await attempt.RefreshTask;
+			}
 		}
 		catch (Exception exc) when (Logger.WriteError(exc))
 		{
@@ -211,20 +308,17 @@ public partial class UmbrellaFileUpload : ComponentBase, IDisposable
 	/// <inheritdoc />
 	public void Dispose()
 	{
+		_disposed = true;
 		ClearSelection();
 		GC.SuppressFinalize(this);
 	}
 
 	private void Cleanup(UmbrellaFileUploadStatus status)
 	{
-		if (_cancellationTokenSource is not null)
-		{
-			_cancellationTokenSource.Cancel();
-			_cancellationTokenSource.Dispose();
-			_cancellationTokenSource = null;
-		}
-
+		UmbrellaFileUploadAttempt? attempt = _uploadAttempt;
+		_uploadAttempt = null;
 		Status = status;
+		attempt?.Cancel();
 	}
 
 	private void ClearSelection()

@@ -34,6 +34,13 @@ public partial class UmbrellaManagedFileUpload : ComponentBase
 	public int? MaxFileSizeBytes { get; set; } = 512000;
 
 	/// <summary>
+	/// Gets or sets the progress source forwarded to <see cref="UmbrellaFileUpload"/>.
+	/// Defaults to source-stream reads. Handler-reported mode uses <see cref="UmbrellaFileUploadRequestEventArgs.UploadProgress"/>.
+	/// </summary>
+	[Parameter]
+	public UmbrellaFileUploadProgressMode ProgressMode { get; set; }
+
+	/// <summary>
 	/// Gets or sets whether a warning message should be shown when the current file selection is cleared.
 	/// </summary>
 	[Parameter]
@@ -170,8 +177,19 @@ public partial class UmbrellaManagedFileUpload : ComponentBase
 
 		IOperationResult? result = await OnRequestUpload(args);
 
-		if (RestoreExistingFileAfterSuccessfulUpload(result))
-			await InvokeAsync(StateHasChanged);
+		if (!args.UploadCancellationToken.IsCancellationRequested && result is { IsSuccess: true })
+		{
+			void RestoreExistingFile()
+			{
+				if (RestoreExistingFileAfterSuccessfulUpload(result))
+					StateHasChanged();
+			}
+
+			if (args.RegisterSuccessCallback is { } register)
+				register(RestoreExistingFile);
+			else
+				await InvokeAsync(RestoreExistingFile);
+		}
 
 		return result;
 	}
