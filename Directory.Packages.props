@@ -5,9 +5,9 @@
   <ItemGroup>
     <PackageVersion Include="AutoMapper" Version="10.0.0" />
     <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Blobs" Version="1.5.1" Condition="'$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net9.0'" />
-    <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Blobs" Version="1.5.4" Condition="'$(TargetFramework)' == 'net10.0'" />
+    <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Blobs" Version="1.5.5" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Keys" Version="1.6.1" Condition="'$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net9.0'" />
-    <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Keys" Version="1.6.4" Condition="'$(TargetFramework)' == 'net10.0'" />
+    <PackageVersion Include="Azure.Extensions.AspNetCore.DataProtection.Keys" Version="1.6.5" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Azure.Identity" Version="1.17.2" Condition="'$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net9.0'" />
     <PackageVersion Include="Azure.Identity" Version="1.21.0" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Azure.Messaging.ServiceBus" Version="7.20.1" Condition="'$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net9.0'" />
@@ -129,9 +129,9 @@
     <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="9.0.21" Condition="'$(TargetFramework)' == 'net9.0'" />
     <PackageVersion Include="Microsoft.Graph" Version="6.8.0" />
     <PackageVersion Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.23.0" />
-    <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.110" Condition="'$(TargetFramework)' == 'net10.0'" />
+    <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.120" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Microsoft.Maui.Controls" Version="9.0.120" Condition="'$(TargetFramework)' == 'net9.0'" />
-    <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.110" Condition="'$(TargetFramework)' == 'net10.0'" />
+    <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.120" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="9.0.120" Condition="'$(TargetFramework)' == 'net9.0'" />
     <PackageVersion Include="Microsoft.Owin" Version="4.2.3" />
     <PackageVersion Include="Microsoft.Owin.Host.SystemWeb" Version="4.2.3" />
