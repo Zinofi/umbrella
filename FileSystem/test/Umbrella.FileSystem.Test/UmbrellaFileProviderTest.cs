@@ -11,6 +11,7 @@ using Umbrella.FileSystem.AzureStorage;
 using Umbrella.FileSystem.Dataverse;
 using Umbrella.FileSystem.Disk;
 using Umbrella.FileSystem.SharePoint;
+using Umbrella.FileSystem.Testing;
 using Umbrella.Internal.Mocks;
 using Umbrella.Utilities.Compilation;
 using Umbrella.Utilities.Helpers;
@@ -35,10 +36,7 @@ public class UmbrellaFileProviderTest : IClassFixture<FileSystemAzuriteContainer
 			.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-	private static readonly IConfiguration _sharePointConfig = new ConfigurationBuilder()
-		.AddUserSecrets<UmbrellaFileProviderTest>()
-		.AddEnvironmentVariables()
-		.Build();
+	private static readonly IConfiguration _sharePointConfig = SharePointTestConfiguration.Create<UmbrellaFileProviderTest>();
 
 	private static string SharePointTenantId => _sharePointConfig["SharePoint:TenantId"]!;
 	private static string SharePointClientId => _sharePointConfig["SharePoint:ClientId"]!;
@@ -87,7 +85,7 @@ public class UmbrellaFileProviderTest : IClassFixture<FileSystemAzuriteContainer
 		_diskProvider
 	];
 
-	// SharePoint and Dataverse throw NotSupportedException for metadata operations
+	// These providers support arbitrary metadata keys without provisioning column mappings.
 	private static readonly List<Func<IUmbrellaFileStorageProvider>> _metadataCapableProviders =
 	[
 		_azureBlobProvider,
@@ -1539,8 +1537,8 @@ public class UmbrellaFileProviderTest : IClassFixture<FileSystemAzuriteContainer
 	{
 		var options = new UmbrellaSharePointFileStorageProviderOptions
 		{
-			SiteId = "zinofi.sharepoint.com:/sites/Berkeley:",
-			DriveName = "General Document",
+			SiteId = _sharePointConfig["SharePoint:SiteId"]!,
+			DriveName = _sharePointConfig["SharePoint:DriveName"]!,
 			GraphServiceClient = new GraphServiceClient(new ClientSecretCredential(SharePointTenantId, SharePointClientId, SharePointClientSecret)),
 			AllowUnhandledFileAuthorizationChecks = true
 		};

@@ -167,6 +167,10 @@ public class UmbrellaSharePointFileStorageProvider<TOptions> : UmbrellaFileStora
 
 	#region Overridden Methods
 	/// <inheritdoc />
+	protected override IUmbrellaFileMetadataProvider CreateDefaultMetadataProvider()
+		=> new UmbrellaSharePointFileMetadataProvider(Options, GenericTypeConverter);
+
+	/// <inheritdoc />
 	protected override async Task<IUmbrellaFileInfo?> GetFileAsync(string subpath, bool isNew, CancellationToken cancellationToken)
 	{
 		cancellationToken.ThrowIfCancellationRequested();
@@ -240,20 +244,7 @@ public class UmbrellaSharePointFileStorageProvider<TOptions> : UmbrellaFileStora
 	}
 
 	private async Task<string> ResolveDriveIdAsync(CancellationToken cancellationToken)
-	{
-		DriveCollectionResponse? drives = await Options.GraphServiceClient.Sites[Options.SiteId].Drives
-			.GetAsync(config =>
-			{
-				config.QueryParameters.Select = ["id", "name"];
-			}, cancellationToken: cancellationToken)
-			.ConfigureAwait(false);
-
-		Drive? drive = drives?.Value?.FirstOrDefault(x => x is not null && string.Equals(x.Name, Options.DriveName, StringComparison.OrdinalIgnoreCase));
-
-		return !string.IsNullOrWhiteSpace(drive?.Id)
-			? drive!.Id
-			: throw new InvalidOperationException($"The SharePoint document library '{Options.DriveName}' could not be found for site '{Options.SiteId}'.");
-	}
+		=> await SharePointGraphHelper.ResolveDriveIdAsync(Options, cancellationToken).ConfigureAwait(false);
 	#endregion
 
 	#region IDisposable Support

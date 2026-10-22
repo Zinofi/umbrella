@@ -199,7 +199,7 @@ public class UmbrellaRemoteFileMetadataTest
 	}
 
 	[Fact]
-	public async Task SharePointDefaultMetadataIsUnsupportedButFileDeletionStillWorks()
+	public async Task SharePointExplicitUnsupportedMetadataStillAllowsFileDeletion()
 	{
 		using var handler = new GraphHandler(_ => new(HttpStatusCode.NoContent));
 		using var http = new HttpClient(handler);

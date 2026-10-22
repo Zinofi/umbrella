@@ -1,6 +1,7 @@
 
 namespace Umbrella.FileSystem.SharePoint.Test;
 
+[Trait("Category", "Unit")]
 public class UmbrellaSharePointFileProviderTest
 {
 	private const string SiteId = "zinofi.sharepoint.com:/sites/Berkeley:";

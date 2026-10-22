@@ -5,6 +5,7 @@ using Umbrella.FileSystem.Abstractions;
 
 namespace Umbrella.FileSystem.SharePoint.Test;
 
+[Trait("Category", "Unit")]
 public class UmbrellaSharePointServiceCollectionExtensionsTest
 {
 	[Fact]

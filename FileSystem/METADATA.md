@@ -7,7 +7,65 @@ File content and metadata can use different storage backends. Configure a metada
 | Disk | JSON `.umfsmeta` sidecar |
 | Azure Blob Storage | Native blob metadata |
 | Dataverse | Configured typed column mappings |
-| SharePoint | Unsupported (`NotSupportedException`) |
+| SharePoint | Configured typed library columns |
+
+## SharePoint library columns
+
+SharePoint now uses `UmbrellaSharePointFileMetadataProvider` by default. Configure the logical metadata keys and the **internal/API-facing names** of their library columns. The existing file and metadata interfaces are unchanged.
+
+```csharp
+builder.Services.AddUmbrellaSharePointFileStorageProvider((services, options) =>
+{
+    options.GraphServiceClient = services.GetRequiredService<GraphServiceClient>();
+    options.SiteId = "contoso.sharepoint.com:/sites/Contracts:";
+    options.DriveName = "Documents";
+    options.MetadataColumnMappings["IsVisible"] = new()
+    {
+        ColumnName = "IsVisible",
+        ColumnType = SharePointMetadataColumnType.Boolean
+    };
+    options.MetadataColumnMappings["Status"] = new()
+    {
+        ColumnName = "DocumentStatus",
+        DisplayName = "Document status",
+        ColumnType = SharePointMetadataColumnType.Choice,
+        Choices = ["Draft", "Approved"]
+    };
+});
+
+// Retain the application's existing file authorization registrations.
+var app = builder.Build();
+
+// Optional, explicit schema provisioning. Omit when deployment already created the columns.
+await UmbrellaSharePointMetadataSchema.EnsureAsync(
+    app.Services.GetRequiredService<UmbrellaSharePointFileStorageProviderOptions>(),
+    app.Lifetime.ApplicationStopping);
+
+var storage = app.Services.GetRequiredService<IUmbrellaSharePointFileStorageProvider>();
+var file = await storage.GetAsync("/contracts/example.pdf", app.Lifetime.ApplicationStopping);
+if (file is not null)
+{
+    await file.SetMetadataValueAsync("IsVisible", true, writeChanges: false,
+        cancellationToken: app.Lifetime.ApplicationStopping);
+    await file.SetMetadataValueAsync("Status", "Approved", writeChanges: false,
+        cancellationToken: app.Lifetime.ApplicationStopping);
+    await file.WriteMetadataChangesAsync(app.Lifetime.ApplicationStopping);
+}
+```
+
+Supported types are `Text`, `MultilineText` (plain replacement text), `Boolean`, `Number`, `DateTime`, and single-value `Choice`. Choices are case-sensitive and must be configured explicitly. Numbers use SharePoint's double-precision representation, not arbitrary-precision decimals. Dates are serialized in UTC; a `DateTime` without a kind and date strings without an offset are interpreted as UTC. Lookup, person, managed metadata, multivalue fields, and JSON objects are not supported.
+
+Metadata keys are case-insensitive. Mappings are captured when the native backend is created. Duplicate column mappings, blank names, invalid types, and invalid choices are rejected. Reads of unmapped or unset keys return the caller's fallback. Writes and removals of unmapped keys throw (unlike the Dataverse backend, which ignores them). With no mappings, reads return fallbacks and clear/save operations do nothing; no metadata network calls are made. This replaces SharePoint's previous default `NotSupportedException` behaviour.
+
+The setup helper resolves an **existing** site/library, reads all column-definition pages, validates existing mapped columns, then creates missing columns. It creates optional, writable fields and does not modify or delete existing columns, create libraries, configure indexes, or change SharePoint/Dynamics views. It rejects incompatible types, read-only or append-only columns, rich text mappings, and incompatible choice definitions. Existing display names are left alone. Concurrent creation conflicts are reread and validated. Setup can be rerun safely; a failure may leave earlier columns created, and the exception identifies the failed column. The mapping names must match the internal names returned by SharePoint.
+
+Schema provisioning requires additional permissions: Graph documents `Sites.Manage.All` for [creating columns](https://learn.microsoft.com/en-us/graph/api/list-post-columns?view=graph-rest-1.0), compared with `Sites.ReadWrite.All` for [updating item fields](https://learn.microsoft.com/en-us/graph/api/listitem-update?view=graph-rest-1.0). Provisioning can instead run in deployment with a separately authorized Graph client and the same mappings. Runtime metadata operations never create schema.
+
+Each saved batch PATCHes only the affected fields; clearing targets all mapped fields and then applies staged values. Unrelated library columns are preserved. Removing metadata sends an explicit null field value—it does not delete the column. SharePoint's required-field rules, defaults, text limits, and other validation still apply; Yes/No fields may normalize a cleared value to false. Refresh the file-info instance to observe server normalization or edits made elsewhere. Rejected writes retain pending changes for retry. There is no ETag concurrency check: writes to different columns are independent, while successful writes to the same column are last-writer-wins.
+
+Metadata is available after file content has been written. Existing copy/move behaviour transfers persisted mapped values, not pending source changes; destination mappings must accept those keys. A failed metadata copy can leave destination content behind, but move does not delete the source. Native file and directory deletion need no separate metadata cleanup because the fields belong to the deleted items.
+
+An explicitly configured `MetadataProvider` remains exclusive and takes precedence over native columns. Its existing `MetadataNamespace` requirement is unchanged. Native columns do not require a namespace. This addition does not implement metadata querying, search, pagination, automatic schema migrations, or Dynamics UI changes.
 
 ## SharePoint with application-owned database metadata
 

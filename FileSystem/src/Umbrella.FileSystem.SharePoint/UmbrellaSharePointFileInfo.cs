@@ -20,6 +20,10 @@ public record UmbrellaSharePointFileInfo : IUmbrellaRangeReadableFileInfo
 {
 	private readonly UmbrellaFileMetadataManager _metadata;
 
+	internal GraphServiceClient MetadataGraphClient => _graphServiceClient;
+	internal string MetadataDriveId => _driveId;
+	internal string MetadataRelativePath => _sharePointRelativePath;
+
 	internal Task<bool> AuthorizeMissingFileDeletionAsync(CancellationToken cancellationToken)
 		=> _metadata.AuthorizeMissingFileDeletionAsync(cancellationToken);
 

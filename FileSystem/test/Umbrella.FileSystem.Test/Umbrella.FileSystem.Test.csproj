@@ -7,6 +7,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<Compile Include="..\SharePointTestConfiguration.cs" Link="SharePointTestConfiguration.cs" />
 		<Compile Remove="TestResults\**" />
 		<EmbeddedResource Remove="TestResults\**" />
 		<None Remove="TestResults\**" />
