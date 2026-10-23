@@ -129,6 +129,10 @@ additional contract declarations without introducing a duplicate action.
 Report changed files, validation results and any remaining compatibility limits.
 Scaffolding an upload endpoint does not authorize replacing storage or widening access.
 
+## Client progress integration
+
+When the task includes client upload progress, read [client upload progress](../../../.ai-shared/bundles/umbrella/client-upload-progress.md). It covers optional reporter forwarding, direct browser streaming opt-in, ownership and cancellation. Verify installed APIs and framework-compatible dependencies before scaffolding; do not silently upgrade the consuming app. Preserve this raw-body protocol and support for requests without `Content-Length`. Progress does not require a server action change.
+
 ## Companion workflows
 
 - `umbrella-dotnet-scaffold-file-handler`: application file handlers and registrations.

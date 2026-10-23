@@ -22,6 +22,10 @@ Keep the native `Logger.WriteError` call and meaningful state in the filter for 
 
 Pass the component's `CancellationToken` to component-owned service calls and asynchronous mappings that accept one. Use named `cancellationToken: CancellationToken` arguments where other optional parameters make the position ambiguous. Apply the same rule to lookup, create, update, delete, upload, and enrichment calls. If an operation intentionally outlives the component, use its documented ownership contract instead.
 
+## Cancellation of an individual upload
+
+For an upload callback, link the page lifetime token with `evt.UploadCancellationToken` and pass the linked token to the upload service. Dispose the linked source when the callback finishes. Check that token again after awaiting the service and before mutating the model or preview, since a service can finish after cancellation. In the exception filter above, test the linked token instead of only the page token: both navigation and cancelling an individual upload are expected cancellation and must propagate without a generic error dialog. An uncancelled token still means a timeout/cancellation exception is a failure. Forward `evt.UploadProgress` when the service supports it; see [client upload progress](client-upload-progress.md) for the complete integration.
+
 ## Complete the UI state transition
 
 For a load owned by the page, set `LayoutState.Loading` and reset the prior error message at the start of each attempt, including retry. Every handled load failure must set `LayoutState.Error`; showing a dialog alone is not a terminal loading state. Set the error state before awaiting any optional error dialog, so a failed or delayed dialog does not keep the page loading.

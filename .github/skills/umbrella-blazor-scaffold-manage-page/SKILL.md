@@ -255,7 +255,7 @@ public abstract class ManageBase : <AppName>ClientComponentBase
 
 ### Additional injections for file upload
 
-When file upload is needed, add:
+When file upload is needed, first read [client upload progress](../../../.ai-shared/bundles/umbrella/client-upload-progress.md) and verify the installed API and service support. The example below opts into handler-reported progress; retain stream-read mode for consumers that have not adopted the reporting contract. Set `ProgressMode="UmbrellaFileUploadProgressMode.HandlerReported"` on the upload component when using this callback. Add:
 
 ```csharp
 [Inject]
@@ -265,12 +265,16 @@ protected UmbrellaFileImagePreviewUpload ImagePreviewUpload { get; set; } = null
 
 public async Task<IOperationResult?> UploadFileToTempDirectoryAsync(UmbrellaFileUploadRequestEventArgs evt)
 {
+    using var uploadCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+        CancellationToken, evt.UploadCancellationToken);
+
     try
     {
         if (CreateUpdateModel is null)
             throw new InvalidOperationException("The model should not be null here.");
 
-        var fileUploadResult = await FileUploadService.UploadAsync(evt.Content, evt.FileName, FileUploadType.<Name>Image, evt.Type, CancellationToken);
+        var fileUploadResult = await FileUploadService.UploadAsync(evt.Content, evt.FileName, FileUploadType.<Name>Image, evt.Type, cancellationToken: uploadCancellation.Token, uploadProgress: evt.UploadProgress);
+        uploadCancellation.Token.ThrowIfCancellationRequested();
 
         if (fileUploadResult.IsSuccess)
         {
@@ -291,7 +295,7 @@ public async Task<IOperationResult?> UploadFileToTempDirectoryAsync(UmbrellaFile
         return fileUploadResult;
     }
     catch (Exception exc) when (
-        !(exc is OperationCanceledException && CancellationToken.IsCancellationRequested)
+        !(exc is OperationCanceledException && uploadCancellation.IsCancellationRequested)
         && Logger.WriteError(exc, new { evt.FileName, evt.Type }, ignoreCancellationExceptions: false))
     {
         await DialogUtility.ShowDangerMessageAsync();
@@ -328,5 +332,5 @@ protected void OnDeleteImage()
 12. A successful upload while editing sets the matching replacement flag (`ReplaceExistingImage`, `ReplaceExistingFile`, or the feature-specific equivalent) after assigning the temporary provider filename. Do not rely only on the delete/replace button handler; image-preview upload controls can upload directly over an existing preview.
 13. Read `.ai-shared\bundles\umbrella\analyzer-compatibility.md` and build with the installed analyzers enabled.
 14. Load/retry starts in `LayoutState.Loading`, resets the prior error message, and reaches `LayoutState.Error` on handled failure; the inline error fragment offers retry and identifies timeouts.
-15. Load, save, upload, and async mapping calls pass the component lifetime token where supported. Their exception filters suppress only token-confirmed navigation cancellation and use `ignoreCancellationExceptions: false` for other failures.
+15. Load, save, and async mapping calls pass the component lifetime token where supported. Uploads link it with `evt.UploadCancellationToken`, forward `evt.UploadProgress`, and check cancellation before applying results. Exception filters suppress token-confirmed navigation/upload cancellation and use `ignoreCancellationExceptions: false` for other failures.
 16. When changing request handling, verify timeout/retry, disposal during a pending request, and applicable transient-failure versus missing-resource behaviour as described in the shared reference.
