@@ -127,7 +127,7 @@
     <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="10.0.13" Condition="'$(TargetFramework)' == 'net462'" />
     <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="8.0.32" Condition="'$(TargetFramework)' == 'net8.0'" />
     <PackageVersion Include="Microsoft.Extensions.ObjectPool" Version="9.0.21" Condition="'$(TargetFramework)' == 'net9.0'" />
-    <PackageVersion Include="Microsoft.Graph" Version="6.8.0" />
+    <PackageVersion Include="Microsoft.Graph" Version="6.9.0" />
     <PackageVersion Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.23.0" />
     <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.120" Condition="'$(TargetFramework)' == 'net10.0'" />
     <PackageVersion Include="Microsoft.Maui.Controls" Version="9.0.120" Condition="'$(TargetFramework)' == 'net9.0'" />
