@@ -69,6 +69,7 @@ Recommendation rules:
 - Preserve provider-specific options such as migrations assembly and query splitting in the test factory.
 - If the context constructor uses non-generic `DbContextOptions`, the concrete factory may need to remove or replace both `DbContextOptions<TDbContext>` and `DbContextOptions`.
 - Keep Testcontainers tests in a collection that disables parallelization unless the suite has been explicitly designed for concurrent containers.
+- If the application owns its schema without an EF Core context (for example an Optimizely CMS site, which creates its schema on first start), record how the schema is created and seeded instead, and recommend the "Hosts without an EF Core `DbContext`" pattern in `umbrella-dotnet-scaffold-aspnetcore-integration-tests` rather than `UmbrellaSqlServerAzuriteWebApplicationFactory`. Note any registrations the host needs from the application that a minimal test host must reproduce.
 
 When SQL Server migrations or deployment-script coverage are relevant, also capture:
 

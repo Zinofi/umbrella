@@ -16,7 +16,7 @@ Before writing files, either run `umbrella-dotnet-audit-aspnetcore-integration-t
 - server project path and entry point type;
 - whether a public partial `Program` hook exists;
 - authentication scheme and required claims;
-- EF Core `DbContext` type and constructor shape;
+- EF Core `DbContext` type and constructor shape, or how the application creates its schema when it has no EF Core context;
 - database provider and migrations assembly;
 - required startup configuration values;
 - external services that must be isolated, including Azure Blob Storage/Azurite requirements;
@@ -242,6 +242,20 @@ protected override void ReplaceDbContextRegistration(IServiceCollection services
 ```
 
 Do not use EF InMemory as a substitute for SQL Server controller integration tests unless the user explicitly asks for a fast smoke-only suite.
+
+### Hosts without an EF Core `DbContext`
+
+`UmbrellaSqlServerAzuriteWebApplicationFactory<TProgram, TDbContext>` replaces an EF Core registration and calls `Migrate()`. Some hosts own their schema instead, for example an Optimizely CMS site, which creates its database schema on first start. For those, derive from `UmbrellaWebApplicationFactory<Program>`, implement `IAsyncLifetime`, and own the containers directly, keeping the same images as the Umbrella base:
+
+- Start `MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04")` and an Azurite container in parallel in `InitializeAsync`.
+- Create a named database with `CREATE DATABASE` rather than letting the application write its schema into `master`, then pass a connection string with that `InitialCatalog`.
+- Inject connection strings with `builder.UseSetting(...)` in `ConfigureWebHostBuilder`, which reaches minimal-hosting `Program` configuration before startup reads it.
+- Let the application create its schema (for Optimizely, `DataAccessOptions.CreateDatabaseSchema = true` in the test host), then seed deterministic content in code after the host builds. Prefer seeding in code over pre-built database images: the data stays versioned with the tests and schema upgrades need no image rebuild.
+- Starting such a host is expensive, so share one per test assembly with xUnit v3 `[assembly: AssemblyFixture(typeof(<App>WebApplicationFactory))]` instead of a collection fixture. Keep read-only tests on the shared seed; tests that change shared data go in a `[CollectionDefinition(Name, DisableParallelization = true)]` collection or create and delete their own data.
+- Logging during assembly-fixture startup happens outside any test's output helper, so also add console logging and `[assembly: CaptureConsole]` to see host failures in test output.
+- When the application is a library rather than a site, create a minimal `Microsoft.NET.Sdk.Web` test host project (`IsTestProject=false`, `IsPackable=false`) with a `public partial class Program`, and reference it from the integration test project.
+
+Detect Docker before starting containers so local runs without Docker skip rather than fail, but never skip on CI: when `TF_BUILD` is set, let a missing Docker engine fail the run. Retry the probe (for example `docker version --format {{.Server.Version}}` with a timeout): a busy machine starting several test hosts can make the first call slow, and a false negative silently skips every container test. Container tests need a Linux agent (`vmImage: ubuntu-latest`); hosted Windows agents cannot run the Linux SQL Server and Azurite images.
 
 ### Migration deployment-script coverage
 

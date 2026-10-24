@@ -33,7 +33,7 @@ Before writing files:
 
 - Use singular `.Test`, never `.Tests`.
 - Prefer `Test\<ProjectName>.Test\<ProjectName>.Test.csproj`.
-- For app-specific web tests, use the app namespace and layer in the name, for example `ThriveForSend.Web.Server.Test`.
+- For app-specific web tests, use the app namespace and layer in the name, for example `IndyRecords.Web.Server.Test`.
 - For general tests, use a clear feature/slice name such as `<App>.Architecture.Test` or `<App>.Mapperly.Test`.
 
 ## Project file pattern

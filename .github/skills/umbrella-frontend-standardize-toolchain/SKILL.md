@@ -28,7 +28,7 @@ Report selected projects/profile, findings and exceptions, changed files, actual
 | Isolated styles | umbrella-dotnet-configure-scoped-scss |
 | Build/publish/consumers | umbrella-dotnet-integrate-frontend-build |
 
-Resolve helpers before finalizing watchers, then integrate the combined build. New projects need a currently compatible version set verified from official metadata, not a historical Thrive package snapshot.
+Resolve helpers before finalizing watchers, then integrate the combined build. New projects need a currently compatible version set verified from official metadata, not a historical package snapshot copied from another client project.
 
 4. Use the NPM upgrade, Sass module migration and Bootstrap theme skills only within requested scope. Routine alignment does not authorize rebranding, browser-support changes, source migration or bundler replacement.
 5. Verify installation/graph, typecheck, both asset modes, isolated CSS and clean publish at the combined boundary. Repeat checks only if later changes invalidate them. Exercise affected watcher/failure scenarios from the shared validation guide.

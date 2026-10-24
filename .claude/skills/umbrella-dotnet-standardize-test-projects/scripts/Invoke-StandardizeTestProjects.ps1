@@ -30,6 +30,8 @@ function Get-RepoScopedTempReportPath {
 }
 
 $TestCondition = "'`$(IsTestProject)'=='true'"
+# Matches the test condition however it is spaced, e.g. '$(IsTestProject)' == 'true', so existing blocks are found.
+$TestConditionAttributePattern = "Condition\s*=\s*[`"']\s*'\`$\(IsTestProject\)'\s*==\s*'true'\s*[`"']"
 $RequiredGlobalTestRunner = 'Microsoft.Testing.Platform'
 $RequiredCentralPackages = [ordered]@{
     'Microsoft.Testing.Extensions.CodeCoverage' = '18.9.0'
@@ -160,7 +162,7 @@ function Add-OrReplace-TestConditionBlock {
         [string]$Block
     )
 
-    $conditionPattern = "Condition\s*=\s*[`"']" + [regex]::Escape($TestCondition) + "[`"']"
+    $conditionPattern = $TestConditionAttributePattern
     $blockPattern = "(?ms)\r?\n?\s*<$ElementName\s+$conditionPattern\s*>.*?</$ElementName>"
 
     $updated = [regex]::Replace($Content, $blockPattern, '', [System.Text.RegularExpressions.RegexOptions]::None)
@@ -178,7 +180,7 @@ function Get-TestConditionBlocks {
         [string]$ElementName
     )
 
-    $conditionPattern = "Condition\s*=\s*[`"']" + [regex]::Escape($TestCondition) + "[`"']"
+    $conditionPattern = $TestConditionAttributePattern
     $blockPattern = "(?ms)<$ElementName\s+$conditionPattern\s*>.*?</$ElementName>"
     return @([regex]::Matches($Content, $blockPattern) | ForEach-Object { $_.Value })
 }
@@ -225,6 +227,27 @@ function Get-CentralSemanticState {
         $values = [ordered]@{}
         foreach ($key in $RequiredCentralPackages.Keys) {
             $values[$key] = $null
+        }
+
+        if (Test-CentralPackageManagementEnabled -Content $Content) {
+            # True CPM: the test block references packages without versions; versions live in PackageVersion items
+            # (or GlobalPackageReference items, which also reference the package for every project).
+            foreach ($key in $RequiredCentralPackages.Keys) {
+                $isGlobal = $null -ne (Get-CentralPackageItemVersion -Content $Content -ItemName 'GlobalPackageReference' -PackageId $key)
+                $isReferenced = $isGlobal
+                foreach ($block in $blocks) {
+                    if ($block -match "<PackageReference\s+[^>]*Include\s*=\s*`"$([regex]::Escape($key))`"") {
+                        $isReferenced = $true
+                    }
+                }
+
+                $values[$key] = [pscustomobject]@{
+                    referenced = $isReferenced
+                    version = Get-CpmPackageVersion -Content $Content -PackageId $key
+                }
+            }
+
+            return ([pscustomobject]$values | ConvertTo-Json -Compress)
         }
 
         foreach ($block in $blocks) {
@@ -345,7 +368,7 @@ function Set-DirectoryBuildPropsContent {
         $Content = "<Project>`r`n</Project>`r`n"
     }
 
-    $conditionPattern = "Condition\s*=\s*[`"']" + [regex]::Escape($TestCondition) + "[`"']"
+    $conditionPattern = $TestConditionAttributePattern
     $itemGroupPattern = "(?ms)<ItemGroup\s+$conditionPattern\s*>.*?</ItemGroup>"
     $usingLine = "`t`t<Using Include=`"Xunit`" />"
 
@@ -499,8 +522,121 @@ function Get-CentralPackageVersion {
     return $null
 }
 
+function Test-CentralPackageManagementEnabled {
+    param([string]$Content)
+
+    return $Content -match '(?is)<ManagePackageVersionsCentrally>\s*true\s*</ManagePackageVersionsCentrally>'
+}
+
+function Get-CentralPackageItemVersion {
+    param(
+        [string]$Content,
+        [string]$ItemName,
+        [string]$PackageId
+    )
+
+    # Include and Version may appear in either order. A package can have several entries conditioned on the target
+    # framework; those per-framework pins are deliberate, so the highest declared version represents the package and
+    # the older framework-specific lines are never rewritten.
+    $highest = $null
+    foreach ($item in [regex]::Matches($Content, "(?is)<$ItemName\s+[^>]*/>")) {
+        if ($item.Value -match "Include\s*=\s*`"$([regex]::Escape($PackageId))`"" -and
+            $item.Value -match 'Version\s*=\s*"([^"]+)"') {
+            $version = $Matches[1]
+            if ($null -eq $highest -or -not (Test-PackageVersionAtLeast -CandidateVersion $highest -BaselineVersion $version)) {
+                $highest = $version
+            }
+        }
+    }
+
+    return $highest
+}
+
+function Get-CpmPackageVersion {
+    param(
+        [string]$Content,
+        [string]$PackageId
+    )
+
+    $version = Get-CentralPackageItemVersion -Content $Content -ItemName 'PackageVersion' -PackageId $PackageId
+    if ($null -ne $version) {
+        return $version
+    }
+
+    return Get-CentralPackageItemVersion -Content $Content -ItemName 'GlobalPackageReference' -PackageId $PackageId
+}
+
+function Set-CpmDirectoryPackagesPropsContent {
+    param([string]$Content)
+
+    $updated = $Content
+    $missingVersions = [System.Collections.Generic.List[string]]::new()
+    $missingReferences = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($entry in $RequiredCentralPackages.GetEnumerator()) {
+        $packageId = $entry.Key
+        $isGlobal = $null -ne (Get-CentralPackageItemVersion -Content $updated -ItemName 'GlobalPackageReference' -PackageId $packageId)
+        $existingVersion = Get-CpmPackageVersion -Content $updated -PackageId $packageId
+
+        if ($null -eq $existingVersion) {
+            $missingVersions.Add("    <PackageVersion Include=`"$packageId`" Version=`"$($entry.Value)`" />")
+        }
+        elseif (-not (Test-PackageVersionAtLeast -CandidateVersion $existingVersion -BaselineVersion $entry.Value)) {
+            # Raise an older central version to the baseline; never lower a newer one.
+            $itemName = if ($isGlobal) { 'GlobalPackageReference' } else { 'PackageVersion' }
+            $escapedId = [regex]::Escape($packageId)
+            $updated = [regex]::Replace($updated, "(?is)(<$itemName\s+[^>]*Include\s*=\s*`"$escapedId`"[^>]*Version\s*=\s*`")[^`"]+(`")", "`${1}$($entry.Value)`${2}")
+            $updated = [regex]::Replace($updated, "(?is)(<$itemName\s+[^>]*Version\s*=\s*`")[^`"]+(`"[^>]*Include\s*=\s*`"$escapedId`")", "`${1}$($entry.Value)`${2}")
+        }
+
+        $isReferenced = $isGlobal
+        foreach ($block in @(Get-TestConditionBlocks -Content $updated -ElementName 'ItemGroup')) {
+            if ($block -match "<PackageReference\s+[^>]*Include\s*=\s*`"$([regex]::Escape($packageId))`"") {
+                $isReferenced = $true
+            }
+        }
+
+        if (-not $isReferenced) {
+            $missingReferences.Add($packageId)
+        }
+    }
+
+    # References first: re-adding the test block moves it to the end of the file, and the version block should follow it
+    # rather than separate it from any comment that precedes it.
+    if ($missingReferences.Count -gt 0) {
+        # Keep any project-specific references already in the test block; add the shared ones without versions.
+        $existingLines = foreach ($block in @(Get-TestConditionBlocks -Content $updated -ElementName 'ItemGroup')) {
+            [regex]::Matches($block, '(?is)<PackageReference\s+[^>]*/>') | ForEach-Object { "    $($_.Value)" }
+        }
+
+        $referenceLines = @($existingLines) + @($missingReferences | ForEach-Object { "    <PackageReference Include=`"$_`" />" })
+        $block = @"
+  <ItemGroup Condition="'`$(IsTestProject)'=='true'">
+$($referenceLines -join "`r`n")
+  </ItemGroup>
+"@
+        $updated = Add-OrReplace-TestConditionBlock -Content $updated -ElementName 'ItemGroup' -Block $block
+    }
+
+    if ($missingVersions.Count -gt 0) {
+        $versionBlock = @"
+  <!-- Shared test packages (umbrella-dotnet-standardize-test-projects). -->
+  <ItemGroup>
+$($missingVersions -join "`r`n")
+  </ItemGroup>
+"@
+        $updated = [regex]::Replace($updated, '(?is)\s*</Project>\s*$', "`r`n$versionBlock`r`n</Project>`r`n")
+    }
+
+    return $updated
+}
+
 function Set-DirectoryPackagesPropsContent {
     param([string]$Content)
+
+    if (Test-CentralPackageManagementEnabled -Content $Content) {
+        return Set-CpmDirectoryPackagesPropsContent -Content $Content
+    }
 
     $lines = foreach ($entry in $RequiredCentralPackages.GetEnumerator()) {
         $existingVersion = Get-CentralPackageVersion -Content $Content -PackageId $entry.Key

@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File {{skill_dir}}\umbrella-dotnet-standardi
 Analyze another repo:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File {{skill_dir}}\umbrella-dotnet-standardize-test-projects\scripts\Invoke-StandardizeTestProjects.ps1 -Mode Analyze -RepoRoot "D:\ProjectsGIT\BOLE\ProjectBOLE-Kernel"
+powershell -ExecutionPolicy Bypass -File {{skill_dir}}\umbrella-dotnet-standardize-test-projects\scripts\Invoke-StandardizeTestProjects.ps1 -Mode Analyze -RepoRoot "D:\ProjectsGIT\IndyRecords"
 ```
 
 ## Standard Pattern
@@ -53,6 +53,9 @@ Central files should provide:
 - `Directory.Build.props`: `<Using Include="Xunit" />` in an `ItemGroup` conditioned on `IsTestProject=true`.
 - `Directory.Build.targets`: test-only `OutputType`, `IsPackable`, `NoWarn`, `WarningsAsErrors`, `PreserveCompilationContext`, and `UseMicrosoftTestingPlatformRunner`.
 - `Directory.Packages.props`: shared test package injection for `Microsoft.Testing.Extensions.CodeCoverage`, `Microsoft.Testing.Extensions.TrxReport`, `Moq`, and `xunit.v3.mtp-v2`. The script treats its versions as minimum baselines: it upgrades older explicit versions and preserves newer compatible explicit versions.
+  - With true central package management (`<ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>`), the test-conditioned block holds versionless `<PackageReference Include="..." />` items and the versions come from `<PackageVersion>` (or `<GlobalPackageReference>`) items. The script never adds `Version` attributes to those references (that breaks CPM with NU1008). It adds a missing `<PackageVersion>` at the baseline, raises one that is older than the baseline, and leaves newer ones alone.
+  - When a package has several target-framework-conditioned `<PackageVersion>` lines, the highest declared version represents it and the per-framework lines are never rewritten.
+  - The test condition is matched regardless of spacing, so `'$(IsTestProject)' == 'true'` and `'$(IsTestProject)'=='true'` are treated the same.
 
 Runnable test projects should keep only project-specific configuration:
 
