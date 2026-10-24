@@ -213,6 +213,8 @@ internal static partial class CodexMcpConfigManager
         IEnumerable<string> previouslyOwnedServers,
         List<string> conflicts)
     {
+        var previouslyOwned = new HashSet<string>(previouslyOwnedServers, StringComparer.OrdinalIgnoreCase);
+
         if (expectedOwnHash is not null)
         {
             if (!hasSharedRegion)
@@ -221,9 +223,11 @@ internal static partial class CodexMcpConfigManager
                 return;
             }
 
+            // Only servers this bundle already owned can have gone missing. A server a newer bundle
+            // version adds has never been rendered into the region, and this operation adds it.
             string[] missing = [.. ownServers
                 .Select(x => x.Key)
-                .Where(x => !regionServerNames.Contains(x))
+                .Where(x => previouslyOwned.Contains(x) && !regionServerNames.Contains(x))
                 .Order(StringComparer.OrdinalIgnoreCase)];
 
             if (missing.Length > 0)
@@ -242,7 +246,7 @@ internal static partial class CodexMcpConfigManager
         // A server inside the markers that no installed bundle accounts for is user-authored content
         // whether or not this bundle already tracks the region, so the check runs on both paths. A
         // server this bundle is dropping in this same operation is still accounted for.
-        var accountedFor = new HashSet<string>(previouslyOwnedServers, StringComparer.OrdinalIgnoreCase);
+        var accountedFor = new HashSet<string>(previouslyOwned, StringComparer.OrdinalIgnoreCase);
         accountedFor.UnionWith(unionServers.Select(x => x.Key));
 
         string[] unowned = [.. regionServerNames

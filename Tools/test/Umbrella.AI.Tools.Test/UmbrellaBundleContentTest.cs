@@ -150,6 +150,82 @@ public class UmbrellaBundleContentTest
     }
 
     [Fact]
+    public void AnotherBundlesSyncLeavesTheUmbrellaCodexRegionByteIdentical()
+    {
+        // Regression: a consumer repository that authors its own bundle on the same engine, but has
+        // not installed that bundle into itself, runs sync with no manifest of its own. Sync used to
+        // claim every .mcp.json server in that case and render the canonical npx definitions over the
+        // Umbrella Codex overrides, which the next umbrella-ai status then reported as drift.
+        using var workspace = new TemporaryWorkspace();
+        var installer = CreateInstaller();
+        Assert.True(installer.Install(new CommandOptions { TargetPath = workspace.RootPath }).Success);
+
+        string bundleDirectory = Path.Combine(workspace.RootPath, ".ai-shared", "bundles", "indyrecords");
+        _ = Directory.CreateDirectory(bundleDirectory);
+        File.WriteAllText(
+            Path.Combine(bundleDirectory, "bundle.json"),
+            """{ "bundleId": "indyrecords", "displayName": "IndyRecords AI skills and agents", "mcpSourcePath": ".mcp.json" }""");
+
+        string codexPath = Path.Combine(workspace.RootPath, ".codex", "config.toml");
+        byte[] codexBefore = File.ReadAllBytes(codexPath);
+
+        var indyRecordsInstaller = new AiBundleInstaller(Options with { BundleId = "indyrecords", DisplayName = "IndyRecords AI skills and agents" }, workspace.RootPath);
+        var syncResult = indyRecordsInstaller.Sync(workspace.RootPath);
+
+        Assert.True(syncResult.Success, string.Join("; ", syncResult.Conflicts));
+        Assert.Equal(codexBefore, File.ReadAllBytes(codexPath));
+        Assert.Contains("\"env_vars\" = [\"REMARKABLEXCP_ADO_PAT\"]", File.ReadAllText(codexPath), StringComparison.Ordinal);
+
+        var status = installer.GetStatus(new CommandOptions { TargetPath = workspace.RootPath });
+        Assert.True(status.Success, string.Join("; ", status.Conflicts));
+    }
+
+    [Fact]
+    public void UpdateAddsServersIntroducedByANewerBundleVersionWithoutForce()
+    {
+        // Regression: update used to treat every server in the new bundle version as already owned,
+        // so servers it was adding for the first time were reported missing from the Codex region.
+        using var previousRelease = new TemporaryWorkspace();
+        string[] addedServers = ["ado-thrive", "atlassian"];
+        CopyDirectory(Path.Combine(RepoRoot, ".ai-shared"), Path.Combine(previousRelease.RootPath, ".ai-shared"));
+
+        JsonObject mcpRoot = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot, ".mcp.json")))!.AsObject();
+        string bundlePath = Path.Combine(previousRelease.RootPath, ".ai-shared", "bundles", "umbrella", "bundle.json");
+        JsonObject bundle = JsonNode.Parse(File.ReadAllText(bundlePath))!.AsObject();
+
+        foreach (string serverName in addedServers)
+        {
+            _ = mcpRoot["servers"]!.AsObject().Remove(serverName);
+            _ = mcpRoot["mcpServers"]!.AsObject().Remove(serverName);
+            _ = bundle["codexMcpServerOverrides"]!.AsObject().Remove(serverName);
+        }
+
+        File.WriteAllText(Path.Combine(previousRelease.RootPath, ".mcp.json"), mcpRoot.ToJsonString());
+        File.WriteAllText(bundlePath, bundle.ToJsonString());
+
+        using var workspace = new TemporaryWorkspace();
+        var target = new CommandOptions { TargetPath = workspace.RootPath };
+        Assert.True(new AiBundleInstaller(Options, previousRelease.RootPath).Install(target).Success);
+
+        string codexPath = Path.Combine(workspace.RootPath, ".codex", "config.toml");
+        Assert.DoesNotContain("[mcp_servers.\"atlassian\"]", File.ReadAllText(codexPath), StringComparison.Ordinal);
+
+        var installer = CreateInstaller();
+        Assert.True(installer.GetStatus(target).Success);
+
+        var updateResult = installer.Update(target);
+
+        Assert.True(updateResult.Success, string.Join("; ", updateResult.Conflicts));
+        string codexConfig = File.ReadAllText(codexPath);
+        Assert.Contains("[mcp_servers.\"ado-thrive\"]", codexConfig, StringComparison.Ordinal);
+        Assert.Contains("[mcp_servers.\"atlassian\"]", codexConfig, StringComparison.Ordinal);
+        Assert.Contains("\"env_vars\" = [\"THRIVE_ADO_PAT\"]", codexConfig, StringComparison.Ordinal);
+
+        var status = installer.GetStatus(target);
+        Assert.True(status.Success, string.Join("; ", status.Conflicts));
+    }
+
+    [Fact]
     public void InstallLeavesAnExistingExclusionsFileAlone()
     {
         using var workspace = new TemporaryWorkspace();
@@ -159,6 +235,16 @@ public class UmbrellaBundleContentTest
         Assert.True(CreateInstaller().Install(new CommandOptions { TargetPath = workspace.RootPath }).Success);
 
         Assert.Equal("{\"packages\":[\"Contoso\"]}", File.ReadAllText(exclusionsPath));
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string targetPath = Path.Combine(destination, Path.GetRelativePath(source, file));
+            _ = Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            File.Copy(file, targetPath);
+        }
     }
 
     private static string GetRepoRoot()

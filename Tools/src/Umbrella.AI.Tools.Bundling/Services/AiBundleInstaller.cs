@@ -180,10 +180,13 @@ public sealed partial class AiBundleInstaller
             List<AiBundleManifest> otherManifests = [.. LoadAllManifests(repoRoot).Where(x => !IsThisBundle(x, bundle))];
 
             // Sync regenerates derived outputs; it never transfers ownership. A server another installed
-            // bundle already owns, and this manifest does not, stays recorded against that bundle alone.
+            // bundle already owns, and this manifest does not, stays recorded against that bundle alone,
+            // and its Codex definition comes from that bundle's manifest. This holds when this bundle is
+            // not installed at all (no manifest): otherwise its canonical definition would replace the
+            // owning bundle's Codex override in the shared region.
             JsonObject ownServers = RestrictServers(allServers, allServers
                 .Select(x => x.Key)
-                .Where(x => manifest is null || OwnsServer(manifest, x) || !otherManifests.Any(y => OwnsServer(y, x))));
+                .Where(x => (manifest is not null && OwnsServer(manifest, x)) || !otherManifests.Any(y => OwnsServer(y, x))));
 
             // The authoring repository may also host another installed bundle. Its servers remain in
             // the root .mcp.json but are deliberately excluded from this bundle's ownership subset;
